@@ -1,6 +1,6 @@
 use crate::*;
 use serde_json::{from_slice, from_value};
-use std::{thread, time};
+use std::{convert::TryInto, os::fd::AsRawFd, thread, time};
 
 #[test]
 fn test_listen() -> Result<()> {
@@ -208,4 +208,130 @@ fn test_handle() -> Result<()> {
         }
     );
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn test_listener_unix_abstract_socket_type() {
+    const SOCK: &str = "unix:@org.varlink.abstract_socket";
+
+    let listener = Listener::new(SOCK).unwrap();
+    let Listener::UNIX(ref inner, _) = listener else {
+        unreachable!();
+    };
+    let Some(unix_listener) = inner.as_ref() else {
+        unreachable!();
+    };
+    let mut sockaddr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let mut socklen: libc::socklen_t = std::mem::size_of::<libc::sockaddr_un>()
+        .try_into()
+        .unwrap_or(libc::socklen_t::MAX);
+    if unsafe {
+        libc::getsockname(
+            unix_listener.as_raw_fd(),
+            (&mut sockaddr as *mut libc::sockaddr_un).cast(),
+            &mut socklen,
+        )
+    } < 0
+    {
+        let errno = std::io::Error::last_os_error();
+        panic!("getsockname: {:?}", errno);
+    }
+
+    if sockaddr.sun_family != (libc::AF_UNIX as libc::sa_family_t) {
+        panic!(
+            "Expected sockaddr.sun_family == AF_UNIX, got: {}",
+            sockaddr.sun_family
+        );
+    }
+    assert_eq!(
+        sockaddr.sun_path[0], 0,
+        "Expected first byte of sockaddr.sun_path to be a nul byte. sockaddr.sun_path was: {:?}",
+        sockaddr.sun_path
+    );
+    let sun_name_len = socklen as usize - std::mem::size_of::<libc::sa_family_t>();
+    assert!(
+        sun_name_len == SOCK["unix:@".len()..].len() + 1,
+        "sun_name_len = {} but expected {}",
+        sun_name_len,
+        SOCK["unix:@".len()..].len() + 1
+    );
+    let sun_path = unsafe { std::ffi::CStr::from_ptr(sockaddr.sun_path[1..].as_ptr()) };
+    assert_eq!(
+        sun_path,
+        std::ffi::CString::new(&SOCK["unix:@".len()..])
+            .unwrap()
+            .as_c_str(),
+        "expected sockaddr.sun_path == {}, got: {:?}",
+        &SOCK["unix:@".len()..],
+        sun_path
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_listener_unix_socket_type() {
+    const SOCK: &str = "unix:org.varlink.u\u{04}";
+
+    let listener = Listener::new(SOCK).unwrap();
+    let Listener::UNIX(ref inner, _) = listener else {
+        unreachable!();
+    };
+    let Some(unix_listener) = inner.as_ref() else {
+        unreachable!();
+    };
+    let mut sockaddr: libc::sockaddr = unsafe { std::mem::zeroed() };
+    let mut socklen: libc::socklen_t = std::mem::size_of::<libc::sockaddr>()
+        .try_into()
+        .unwrap_or(libc::socklen_t::MAX);
+    if unsafe { libc::getsockname(unix_listener.as_raw_fd(), &mut sockaddr, &mut socklen) } < 0 {
+        let errno = std::io::Error::last_os_error();
+        panic!("getsockname: {:?}", errno);
+    }
+    if sockaddr.sa_family != (libc::AF_UNIX as libc::sa_family_t) {
+        panic!(
+            "Expected sockaddr.sa_family == AF_UNIX, got: {}",
+            sockaddr.sa_family
+        );
+    }
+    let sa_data = unsafe {
+        std::ffi::CString::new::<&[u8]>(
+            std::mem::transmute::<&[libc::c_char; 14], &[u8; 14]>(&sockaddr.sa_data).as_slice(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        sa_data.as_c_str(),
+        std::ffi::CString::new(&SOCK["unix:".len()..])
+            .unwrap()
+            .as_c_str(),
+        "expected sockaddr.sa_data == {:?}, got: {:?}",
+        &SOCK["unix:".len()..],
+        sa_data
+    );
+}
+
+#[test]
+fn test_listener_tcp_socket_type() {
+    let listener = Listener::new("tcp:127.0.0.1:0").unwrap();
+    let Listener::TCP(ref inner, _) = listener else {
+        unreachable!();
+    };
+    let Some(tcp_listener) = inner.as_ref() else {
+        unreachable!();
+    };
+    let mut sockaddr: libc::sockaddr = unsafe { std::mem::zeroed() };
+    let mut socklen: libc::socklen_t = std::mem::size_of::<libc::sockaddr>()
+        .try_into()
+        .unwrap_or(libc::socklen_t::MAX);
+    if unsafe { libc::getsockname(tcp_listener.as_raw_fd(), &mut sockaddr, &mut socklen) } < 0 {
+        let errno = std::io::Error::last_os_error();
+        panic!("getsockname: {:?}", errno);
+    }
+    if sockaddr.sa_family != (libc::AF_INET as libc::sa_family_t) {
+        panic!(
+            "Expected sockaddr.sa_family == AF_INET, got: {}",
+            sockaddr.sa_family
+        );
+    }
 }
